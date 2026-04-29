@@ -1,29 +1,40 @@
-"""TimerModel: countdown timer logic."""
+"""TimerModel: countdown timer with preset support."""
 
 import logging
 import time
+from typing import List, Tuple
 
 from src.models.clock import BaseModel
 
 logger = logging.getLogger(__name__)
 
+# Built-in quick-set presets (label, hours, minutes, seconds)
+TIMER_PRESETS: List[Tuple[str, int, int, int]] = [
+    ("1 min",  0, 1,  0),
+    ("3 min",  0, 3,  0),
+    ("5 min",  0, 5,  0),
+    ("10 min", 0, 10, 0),
+    ("15 min", 0, 15, 0),
+    ("30 min", 0, 30, 0),
+    ("1 hora", 1, 0,  0),
+]
+
 
 class TimerModel(BaseModel):
-    """Manages a countdown timer from a user-specified duration to zero.
+    """Countdown timer from a user-specified duration to zero.
 
-    Uses monotonic timestamps for accurate countdown regardless of system
-    clock changes.
+    Uses ``time.monotonic()`` for accurate countdown regardless of
+    system-clock changes.
 
     Attributes:
-        _total_seconds: The original countdown duration in seconds.
-        _remaining: Seconds remaining when the timer was last paused.
-        _running: Whether the timer is currently counting down.
-        _finished: Whether the timer has reached zero.
-        _start_time: Monotonic timestamp of the most recent start/resume.
+        _total_seconds: Original countdown duration in seconds.
+        _remaining:     Seconds remaining when last paused.
+        _running:       Whether the timer is currently counting down.
+        _finished:      Whether the timer has reached zero.
+        _start_time:    Monotonic timestamp of the most recent start/resume.
     """
 
     def __init__(self) -> None:
-        """Initialise TimerModel in a stopped, zeroed state."""
         super().__init__()
         self._total_seconds: float = 0.0
         self._remaining: float = 0.0
@@ -38,39 +49,42 @@ class TimerModel(BaseModel):
 
     @property
     def running(self) -> bool:
-        """Return True if the timer is currently counting down."""
         return self._running
 
     @property
     def finished(self) -> bool:
-        """Return True if the timer has reached zero."""
         return self._finished
 
     @property
     def total_seconds(self) -> float:
-        """Return the original countdown duration in seconds."""
         return self._total_seconds
 
     @property
     def remaining_seconds(self) -> float:
-        """Return the number of seconds remaining (never negative)."""
+        """Seconds remaining (never negative)."""
         if self._running:
             elapsed = time.monotonic() - self._start_time
-            remaining = self._remaining - elapsed
-            return max(0.0, remaining)
+            return max(0.0, self._remaining - elapsed)
         return max(0.0, self._remaining)
 
+    @property
+    def progress(self) -> float:
+        """Completion fraction in [0.0, 1.0] (0 = full, 1 = done)."""
+        if self._total_seconds <= 0:
+            return 0.0
+        return 1.0 - (self.remaining_seconds / self._total_seconds)
+
     # ------------------------------------------------------------------
-    # Public methods
+    # Configuration
     # ------------------------------------------------------------------
 
     def set_duration(self, hours: int, minutes: int, seconds: int) -> None:
         """Set the countdown duration.
 
         Args:
-            hours: Hours component (0–23).
-            minutes: Minutes component (0–59).
-            seconds: Seconds component (0–59).
+            hours:   0–23.
+            minutes: 0–59.
+            seconds: 0–59.
 
         Raises:
             ValueError: If any component is out of range or total is zero.
@@ -81,26 +95,34 @@ class TimerModel(BaseModel):
             raise ValueError(f"Minutes must be 0–59, got {minutes}.")
         if not 0 <= seconds <= 59:
             raise ValueError(f"Seconds must be 0–59, got {seconds}.")
-
         total = hours * 3600 + minutes * 60 + seconds
         if total == 0:
             raise ValueError("Timer duration must be greater than zero.")
-
         self._total_seconds = float(total)
         self._remaining = float(total)
         self._running = False
         self._finished = False
-        logger.debug(
-            "Timer duration set to %02d:%02d:%02d (%d s).",
-            hours, minutes, seconds, total,
-        )
+        logger.debug("Timer set to %02d:%02d:%02d.", hours, minutes, seconds)
         self._notify()
 
-    def start(self) -> None:
-        """Start or resume the countdown.
+    def apply_preset(self, preset_index: int) -> None:
+        """Apply one of the built-in presets by index.
 
-        Has no effect if already running or finished.
+        Args:
+            preset_index: Index into ``TIMER_PRESETS``.
+
+        Raises:
+            IndexError: If *preset_index* is out of range.
         """
+        _, h, m, s = TIMER_PRESETS[preset_index]
+        self.set_duration(h, m, s)
+
+    # ------------------------------------------------------------------
+    # Controls
+    # ------------------------------------------------------------------
+
+    def start(self) -> None:
+        """Start or resume the countdown."""
         if not self._running and not self._finished and self._remaining > 0:
             self._start_time = time.monotonic()
             self._running = True
@@ -108,10 +130,7 @@ class TimerModel(BaseModel):
             self._notify()
 
     def pause(self) -> None:
-        """Pause the countdown, preserving remaining time.
-
-        Has no effect if already paused.
-        """
+        """Pause the countdown, preserving remaining time."""
         if self._running:
             elapsed = time.monotonic() - self._start_time
             self._remaining = max(0.0, self._remaining - elapsed)
@@ -120,18 +139,27 @@ class TimerModel(BaseModel):
             self._notify()
 
     def reset(self) -> None:
-        """Stop and reset the timer to its original duration."""
+        """Stop and reset to the original duration."""
         self._running = False
         self._finished = False
         self._remaining = self._total_seconds
-        logger.info("Timer reset to %.1f s.", self._total_seconds)
+        logger.info("Timer reset.")
         self._notify()
+
+    def acknowledge(self) -> None:
+        """Dismiss the finished state."""
+        self._finished = False
+        logger.debug("Timer acknowledged.")
+        self._notify()
+
+    # ------------------------------------------------------------------
+    # Tick
+    # ------------------------------------------------------------------
 
     def update(self) -> None:
         """Check for completion and notify observers."""
         if not self._running:
             return
-
         if self.remaining_seconds <= 0:
             elapsed = time.monotonic() - self._start_time
             self._remaining = max(0.0, self._remaining - elapsed)
@@ -142,20 +170,14 @@ class TimerModel(BaseModel):
         else:
             self._notify()
 
-    def acknowledge(self) -> None:
-        """Acknowledge the finished state so the alert is dismissed."""
-        self._finished = False
-        logger.debug("Timer finish acknowledged.")
-        self._notify()
+    # ------------------------------------------------------------------
+    # Formatting
+    # ------------------------------------------------------------------
 
     def format_remaining(self) -> str:
-        """Return remaining time formatted as HH:MM:SS.
-
-        Returns:
-            String in HH:MM:SS format.
-        """
+        """Return remaining time as ``HH:MM:SS``."""
         total = int(self.remaining_seconds)
-        hours = total // 3600
-        minutes = (total % 3600) // 60
-        seconds = total % 60
-        return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+        h = total // 3600
+        m = (total % 3600) // 60
+        s = total % 60
+        return f"{h:02d}:{m:02d}:{s:02d}"

@@ -1,121 +1,70 @@
-"""DigitalClockView: displays current time, date, and weekday."""
+"""DigitalClockView: modern digital time/date display."""
 
 import logging
 import tkinter as tk
 from typing import Dict
 
+import customtkinter as ctk
+
 from src.views.main_window import BaseView
-from src.utils.constants import (
-    DIGITAL_TIME_FONT_SIZE,
-    DIGITAL_DATE_FONT_SIZE,
-    DIGITAL_DAY_FONT_SIZE,
-)
 
 logger = logging.getLogger(__name__)
 
 
 class DigitalClockView(BaseView):
-    """Shows the current time in HH:MM:SS, the date, and the weekday.
-
-    Attributes:
-        _parent: Parent tkinter widget.
-        _time_var: StringVar bound to the time label.
-        _date_var: StringVar bound to the date label.
-        _day_var: StringVar bound to the weekday label.
-    """
+    """Shows HH:MM:SS, date, and weekday with a modern CTk style."""
 
     def __init__(self, parent: tk.Widget) -> None:
-        """Initialise DigitalClockView.
-
-        Args:
-            parent: The parent tkinter widget.
-        """
         super().__init__()
         self._parent = parent
-        self._time_var: tk.StringVar = tk.StringVar(value="00:00:00")
-        self._date_var: tk.StringVar = tk.StringVar(value="")
-        self._day_var: tk.StringVar = tk.StringVar(value="")
-        self._time_label: tk.Label = None  # type: ignore[assignment]
-        self._date_label: tk.Label = None  # type: ignore[assignment]
-        self._day_label: tk.Label = None  # type: ignore[assignment]
+        self._time_var = tk.StringVar(value="00:00:00")
+        self._date_var = tk.StringVar(value="")
+        self._day_var  = tk.StringVar(value="")
+        self._time_label = None
+        self._date_label = None
+        self._day_label  = None
         logger.debug("DigitalClockView initialised.")
 
-    # ------------------------------------------------------------------
-    # BaseView implementation
-    # ------------------------------------------------------------------
-
     def build(self) -> None:
-        """Create and lay out the time, date, and weekday labels."""
-        self._frame = tk.Frame(self._parent)
-        self._frame.pack(fill=tk.X, padx=20, pady=(4, 8))
+        self._frame = ctk.CTkFrame(self._parent, fg_color="transparent")
+        self._frame.pack(fill=tk.X, pady=(2, 6))
 
-        self._time_label = tk.Label(
+        self._time_label = ctk.CTkLabel(
             self._frame,
             textvariable=self._time_var,
-            font=("Courier", DIGITAL_TIME_FONT_SIZE, "bold"),
+            font=ctk.CTkFont(family="Courier New", size=38, weight="bold"),
         )
         self._time_label.pack()
 
-        self._date_label = tk.Label(
+        self._date_label = ctk.CTkLabel(
             self._frame,
             textvariable=self._date_var,
-            font=("Helvetica", DIGITAL_DATE_FONT_SIZE),
+            font=ctk.CTkFont(family="Helvetica", size=13),
         )
         self._date_label.pack()
 
-        self._day_label = tk.Label(
+        self._day_label = ctk.CTkLabel(
             self._frame,
             textvariable=self._day_var,
-            font=("Helvetica", DIGITAL_DAY_FONT_SIZE),
+            font=ctk.CTkFont(family="Helvetica", size=12),
         )
         self._day_label.pack()
         logger.debug("DigitalClockView built.")
 
     def apply_theme(self, colors: Dict[str, str]) -> None:
-        """Apply theme colors to all labels.
-
-        Args:
-            colors: Theme color dictionary.
-        """
-        bg = colors["bg_window"]
-        self._frame.configure(bg=bg)
-        self._time_label.configure(
-            bg=bg,
-            fg=colors["text_primary"],
-        )
-        self._date_label.configure(
-            bg=bg,
-            fg=colors["text_secondary"],
-        )
-        self._day_label.configure(
-            bg=bg,
-            fg=colors["text_secondary"],
-        )
-
-    # ------------------------------------------------------------------
-    # Update methods
-    # ------------------------------------------------------------------
+        self._frame.configure(fg_color="transparent")
+        if self._time_label:
+            self._time_label.configure(text_color=colors["accent"])
+        if self._date_label:
+            self._date_label.configure(text_color=colors["text_primary"])
+        if self._day_label:
+            self._day_label.configure(text_color=colors["text_secondary"])
 
     def update_time(self, time_str: str) -> None:
-        """Update the displayed time string.
-
-        Args:
-            time_str: Time in HH:MM:SS format.
-        """
         self._time_var.set(time_str)
 
     def update_date(self, date_str: str) -> None:
-        """Update the displayed date string.
-
-        Args:
-            date_str: Date string, e.g. '28 April 2026'.
-        """
         self._date_var.set(date_str)
 
     def update_day(self, day_str: str) -> None:
-        """Update the displayed weekday string.
-
-        Args:
-            day_str: Weekday name, e.g. 'Tuesday'.
-        """
         self._day_var.set(day_str)

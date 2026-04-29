@@ -3,83 +3,290 @@
 import logging
 import os
 import tkinter as tk
-from typing import Dict
+from typing import Dict, Optional
 
-from src.models.clock import ClockModel
-from src.models.alarm import AlarmModel
+import customtkinter as ctk
+
+from src.models.clock     import ClockModel
+from src.models.alarm     import AlarmModel
 from src.models.stopwatch import StopwatchModel
-from src.models.timer import TimerModel
+from src.models.timer     import TimerModel
 
-from src.views.main_window import MainWindow
-from src.views.analog_clock import AnalogClockView
-from src.views.digital_clock import DigitalClockView
-from src.views.alarm_view import AlarmView
+from src.views.main_window    import MainWindow
+from src.views.analog_clock   import AnalogClockView
+from src.views.digital_clock  import DigitalClockView
+from src.views.alarm_view     import AlarmView
 from src.views.stopwatch_view import StopwatchView
-from src.views.timer_view import TimerView
-from src.views.timezone_view import TimezoneView
+from src.views.timer_view     import TimerView
+from src.views.timezone_view  import TimezoneView
 
-from src.controllers.clock_controller import ClockController
-from src.controllers.alarm_controller import AlarmController
+from src.controllers.clock_controller     import ClockController
+from src.controllers.alarm_controller     import AlarmController
 from src.controllers.stopwatch_controller import StopwatchController
-from src.controllers.timer_controller import TimerController
+from src.controllers.timer_controller     import TimerController
 
-from src.utils.theme import ThemeManager
-from src.utils.audio import AudioService
-from src.utils.constants import (
-    THEME_LIGHT,
-    APP_TITLE,
-    APP_WIDTH,
-)
+from src.utils.theme     import ThemeManager
+from src.utils.audio     import AudioService
+from src.utils.constants import THEME_DARK, THEME_LIGHT, APP_TITLE, APP_VERSION
 
 logger = logging.getLogger(__name__)
 
-# Resolve the assets directory relative to this file's location
-_ASSETS_DIR = os.path.join(os.path.dirname(__file__), "..", "assets")
+_ASSETS_DIR  = os.path.join(os.path.dirname(__file__), "..", "assets")
 _ALARM_SOUND = os.path.join(_ASSETS_DIR, "alarm_sound.wav")
+
+# Screen keys
+SCREEN_CLOCK     = "clock"
+SCREEN_ALARM     = "alarm"
+SCREEN_STOPWATCH = "stopwatch"
+SCREEN_TIMER     = "timer"
+SCREEN_WORLD     = "world"
+SCREEN_SETTINGS  = "settings"
+
+_NAV_ITEMS = [
+    (SCREEN_CLOCK,     "🕐", "Reloj"),
+    (SCREEN_ALARM,     "⏰", "Alarma"),
+    (SCREEN_STOPWATCH, "⏱", "Cronómetro"),
+    (SCREEN_TIMER,     "⏳", "Temporizador"),
+    (SCREEN_WORLD,     "🌍", "Mundial"),
+    (SCREEN_SETTINGS,  "⚙️", "Ajustes"),
+]
 
 
 class App:
     """Top-level application controller.
 
-    Instantiates all models, views, controllers, and utility services,
-    then wires them together using dependency injection.
+    Layout
+    ------
+    ┌──────────────────────────────────┐
+    │  Top bar  (title + theme toggle) │
+    ├──────────────────────────────────┤
+    │   Content area  (swappable)      │
+    ├──────────────────────────────────┤
+    │  Bottom nav  (6 pill buttons)    │
+    └──────────────────────────────────┘
 
-    Attributes:
-        _window: The MainWindow (root Tk wrapper).
-        _theme: The ThemeManager instance.
-        _audio: The AudioService instance.
-        _clock_model: ClockModel instance.
-        _alarm_model: AlarmModel instance.
-        _stopwatch_model: StopwatchModel instance.
-        _timer_model: TimerModel instance.
+    Keyboard shortcuts
+    ------------------
+    Space       — Start/Stop stopwatch (when on stopwatch screen)
+    L           — Record lap (when stopwatch is running)
+    R           — Reset stopwatch / timer
+    1–6         — Switch to screen by nav index
+    Ctrl+T      — Toggle theme
     """
 
     def __init__(self) -> None:
-        """Initialise the application and build the full UI."""
-        logger.info("Initialising %s.", APP_TITLE)
+        logger.info("Initialising %s %s.", APP_TITLE, APP_VERSION)
 
-        # --- Window ---
+        ctk.set_appearance_mode("dark")
+
         self._window = MainWindow()
         self._window.build()
         self._window.set_on_close(self._on_close)
 
-        # --- Theme ---
-        self._theme = ThemeManager(initial_theme=THEME_LIGHT)
-
-        # --- Audio ---
+        self._theme = ThemeManager(initial_theme=THEME_DARK)
         self._audio = AudioService(sound_path=_ALARM_SOUND)
 
-        # --- Models ---
-        self._clock_model = ClockModel()
-        self._alarm_model = AlarmModel()
+        self._clock_model     = ClockModel()
+        self._alarm_model     = AlarmModel()
         self._stopwatch_model = StopwatchModel()
-        self._timer_model = TimerModel()
+        self._timer_model     = TimerModel()
 
-        # --- Build UI layout ---
+        self._active_screen: str = SCREEN_CLOCK
+        self._nav_buttons: Dict[str, ctk.CTkButton] = {}
+        self._screens:     Dict[str, ctk.CTkFrame]  = {}
+
         self._build_ui()
+        self._wire_controllers()
+        self._bind_keyboard_shortcuts()
 
-        # --- Controllers ---
-        after_fn = self._window.after
+        self._theme.subscribe(self._apply_theme_to_all)
+        self._apply_theme_to_all(self._theme.colors)
+        self._show_screen(SCREEN_CLOCK)
+
+        logger.info("App ready.")
+
+    # ══════════════════════════════════════════════════════════════════
+    # UI construction
+    # ══════════════════════════════════════════════════════════════════
+
+    def _build_ui(self) -> None:
+        root = self._window.frame
+
+        # ── Top bar ───────────────────────────────────────────────────
+        self._top_bar = ctk.CTkFrame(root, height=50, corner_radius=0)
+        self._top_bar.pack(side=tk.TOP, fill=tk.X)
+        self._top_bar.pack_propagate(False)
+
+        self._title_label = ctk.CTkLabel(
+            self._top_bar, text=f"  {APP_TITLE}",
+            font=ctk.CTkFont(size=16, weight="bold"),
+        )
+        self._title_label.pack(side=tk.LEFT, padx=10)
+
+        # Offset indicator (shown when manual offset is active)
+        self._offset_badge = ctk.CTkLabel(
+            self._top_bar, text="⚠ Hora ajustada",
+            font=ctk.CTkFont(size=10),
+            text_color="#F59E0B",
+        )
+        # Not packed initially
+
+        self._theme_btn = ctk.CTkButton(
+            self._top_bar, text="☀️  Modo Claro",
+            width=130, height=32, corner_radius=16,
+            font=ctk.CTkFont(size=12),
+            command=self._toggle_theme,
+        )
+        self._theme_btn.pack(side=tk.RIGHT, padx=12, pady=9)
+
+        # ── Content area ──────────────────────────────────────────────
+        self._content_area = ctk.CTkFrame(root, corner_radius=0, fg_color="transparent")
+        self._content_area.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+
+        self._build_clock_screen()
+        self._build_alarm_screen()
+        self._build_stopwatch_screen()
+        self._build_timer_screen()
+        self._build_world_screen()
+        self._build_settings_screen()
+
+        # ── Bottom nav ────────────────────────────────────────────────
+        self._nav_bar = ctk.CTkFrame(root, height=68, corner_radius=0)
+        self._nav_bar.pack(side=tk.BOTTOM, fill=tk.X)
+        self._nav_bar.pack_propagate(False)
+
+        self._nav_sep = ctk.CTkFrame(self._nav_bar, height=1, corner_radius=0)
+        self._nav_sep.pack(side=tk.TOP, fill=tk.X)
+
+        nav_inner = ctk.CTkFrame(self._nav_bar, fg_color="transparent")
+        nav_inner.pack(fill=tk.BOTH, expand=True)
+        self._nav_inner = nav_inner
+
+        for key, emoji, label in _NAV_ITEMS:
+            col = ctk.CTkFrame(nav_inner, fg_color="transparent")
+            col.pack(side=tk.LEFT, expand=True, fill=tk.BOTH)
+            btn = ctk.CTkButton(
+                col,
+                text=f"{emoji}\n{label}",
+                font=ctk.CTkFont(size=9),
+                width=80, height=56,
+                corner_radius=0,
+                fg_color="transparent",
+                hover_color=None,
+                command=lambda k=key: self._show_screen(k),
+            )
+            btn.pack(expand=True, fill=tk.BOTH)
+            self._nav_buttons[key] = btn
+
+    # ── Screen builders ────────────────────────────────────────────────
+
+    def _make_screen(self, key: str) -> ctk.CTkScrollableFrame:
+        frame = ctk.CTkScrollableFrame(
+            self._content_area, corner_radius=0, fg_color="transparent",
+        )
+        self._screens[key] = frame
+        return frame
+
+    def _build_clock_screen(self) -> None:
+        frame = self._make_screen(SCREEN_CLOCK)
+
+        self._analog_view = AnalogClockView(frame)
+        self._analog_view.build()
+
+        self._digital_view = DigitalClockView(frame)
+        self._digital_view.build()
+
+        self._reset_time_btn = ctk.CTkButton(
+            frame, text="↺  Restablecer hora real",
+            width=200, height=30, corner_radius=15,
+            font=ctk.CTkFont(size=11),
+            command=self._reset_clock_offset,
+        )
+        self._reset_time_btn.pack(pady=(0, 10))
+
+    def _build_alarm_screen(self) -> None:
+        frame = self._make_screen(SCREEN_ALARM)
+        ctk.CTkLabel(frame, text="Alarma",
+                     font=ctk.CTkFont(size=22, weight="bold")).pack(pady=(20, 4))
+        self._alarm_view = AlarmView(frame)
+        self._alarm_view.build()
+
+    def _build_stopwatch_screen(self) -> None:
+        frame = self._make_screen(SCREEN_STOPWATCH)
+        ctk.CTkLabel(frame, text="Cronómetro",
+                     font=ctk.CTkFont(size=22, weight="bold")).pack(pady=(20, 4))
+        self._stopwatch_view = StopwatchView(frame)
+        self._stopwatch_view.build()
+
+    def _build_timer_screen(self) -> None:
+        frame = self._make_screen(SCREEN_TIMER)
+        ctk.CTkLabel(frame, text="Temporizador",
+                     font=ctk.CTkFont(size=22, weight="bold")).pack(pady=(20, 4))
+        self._timer_view = TimerView(frame)
+        self._timer_view.build()
+
+    def _build_world_screen(self) -> None:
+        frame = self._make_screen(SCREEN_WORLD)
+        ctk.CTkLabel(frame, text="Reloj Mundial",
+                     font=ctk.CTkFont(size=22, weight="bold")).pack(pady=(20, 4))
+        self._timezone_view = TimezoneView(frame)
+        self._timezone_view.build()
+
+    def _build_settings_screen(self) -> None:
+        frame = self._make_screen(SCREEN_SETTINGS)
+
+        ctk.CTkLabel(frame, text="Ajustes",
+                     font=ctk.CTkFont(size=22, weight="bold")).pack(pady=(20, 4))
+
+        card = ctk.CTkFrame(frame, corner_radius=16)
+        card.pack(fill=tk.X, padx=20, pady=8)
+        self._settings_card = card
+
+        ctk.CTkLabel(card, text="Apariencia",
+                     font=ctk.CTkFont(size=14, weight="bold")).pack(anchor=tk.W, padx=16, pady=(14, 6))
+
+        # Theme toggle inside settings
+        theme_row = ctk.CTkFrame(card, fg_color="transparent")
+        theme_row.pack(fill=tk.X, padx=16, pady=4)
+        ctk.CTkLabel(theme_row, text="Tema oscuro",
+                     font=ctk.CTkFont(size=12)).pack(side=tk.LEFT)
+        self._dark_switch = ctk.CTkSwitch(
+            theme_row, text="",
+            command=self._toggle_theme,
+        )
+        self._dark_switch.select()   # dark by default
+        self._dark_switch.pack(side=tk.RIGHT)
+
+        ctk.CTkFrame(card, height=1, corner_radius=0).pack(fill=tk.X, padx=16, pady=8)
+
+        # About section
+        ctk.CTkLabel(card, text="Acerca de",
+                     font=ctk.CTkFont(size=14, weight="bold")).pack(anchor=tk.W, padx=16, pady=(4, 6))
+
+        about_text = (
+            f"{APP_TITLE}  v{APP_VERSION}\n"
+            "Reloj analógico y digital con alarma,\n"
+            "cronómetro con vueltas y temporizador\n"
+            "con presets.\n\n"
+            "Atajos de teclado:\n"
+            "  Espacio  →  Iniciar / Detener cronómetro\n"
+            "  L        →  Registrar vuelta\n"
+            "  R        →  Reiniciar\n"
+            "  1–6      →  Cambiar pantalla\n"
+            "  Ctrl+T   →  Cambiar tema"
+        )
+        ctk.CTkLabel(
+            card, text=about_text,
+            font=ctk.CTkFont(size=11),
+            justify="left",
+        ).pack(anchor=tk.W, padx=16, pady=(0, 16))
+
+    # ══════════════════════════════════════════════════════════════════
+    # Controller wiring
+    # ══════════════════════════════════════════════════════════════════
+
+    def _wire_controllers(self) -> None:
+        after_fn  = self._window.after
         cancel_fn = self._window.after_cancel
 
         self._clock_ctrl = ClockController(
@@ -111,136 +318,126 @@ class App:
             after_cancel_fn=cancel_fn,
         )
 
-        # Wire timezone view callback
         self._timezone_view.set_on_change(self._clock_ctrl.on_timezone_changed)
         self._timezone_view.populate_timezones(self._clock_model.get_timezone_names())
 
-        # Register theme observers
-        self._theme.subscribe(self._apply_theme_to_all)
+        # Show/hide offset badge when clock model changes
+        self._clock_model.subscribe(self._update_offset_badge)
 
-        # Apply initial theme
-        self._apply_theme_to_all(self._theme.colors)
+    # ══════════════════════════════════════════════════════════════════
+    # Keyboard shortcuts
+    # ══════════════════════════════════════════════════════════════════
 
-        logger.info("App initialised successfully.")
+    def _bind_keyboard_shortcuts(self) -> None:
+        root = self._window.root
+        root.bind("<space>",   self._kb_space)
+        root.bind("<l>",       self._kb_lap)
+        root.bind("<L>",       self._kb_lap)
+        root.bind("<r>",       self._kb_reset)
+        root.bind("<R>",       self._kb_reset)
+        root.bind("<Control-t>", lambda _e: self._toggle_theme())
+        for i, (key, *_) in enumerate(_NAV_ITEMS, start=1):
+            root.bind(str(i), lambda _e, k=key: self._show_screen(k))
 
-    # ------------------------------------------------------------------
-    # UI construction
-    # ------------------------------------------------------------------
+    def _kb_space(self, _event: tk.Event) -> None:
+        """Space: start/stop stopwatch (regardless of active screen)."""
+        if self._stopwatch_model.running:
+            self._stopwatch_model.stop()
+        else:
+            self._stopwatch_model.start()
 
-    def _build_ui(self) -> None:
-        """Create the scrollable main frame and all view panels."""
-        root_frame = self._window.frame
+    def _kb_lap(self, _event: tk.Event) -> None:
+        if self._stopwatch_model.running:
+            self._stopwatch_model.lap()
 
-        # ---- Top bar: title + theme toggle ----
-        top_bar = tk.Frame(root_frame)
-        top_bar.pack(fill=tk.X, padx=16, pady=(8, 0))
+    def _kb_reset(self, _event: tk.Event) -> None:
+        if self._active_screen == SCREEN_STOPWATCH:
+            self._stopwatch_model.reset()
+        elif self._active_screen == SCREEN_TIMER:
+            self._timer_model.reset()
 
-        self._title_label = tk.Label(
-            top_bar,
-            text=APP_TITLE,
-            font=("Helvetica", 16, "bold"),
-        )
-        self._title_label.pack(side=tk.LEFT)
+    # ══════════════════════════════════════════════════════════════════
+    # Navigation
+    # ══════════════════════════════════════════════════════════════════
 
-        self._theme_btn = tk.Button(
-            top_bar,
-            text="🌙 Dark Mode",
-            command=self._toggle_theme,
-            relief=tk.FLAT,
-            padx=8,
-        )
-        self._theme_btn.pack(side=tk.RIGHT)
+    def _show_screen(self, key: str) -> None:
+        for k, frame in self._screens.items():
+            if k == key:
+                frame.pack(fill=tk.BOTH, expand=True)
+            else:
+                frame.pack_forget()
+        self._active_screen = key
+        self._update_nav_highlight(key)
 
-        # ---- Scrollable canvas for the main content ----
-        canvas_container = tk.Frame(root_frame)
-        canvas_container.pack(fill=tk.BOTH, expand=True)
+    def _update_nav_highlight(self, active_key: str) -> None:
+        colors = self._theme.colors
+        for key, btn in self._nav_buttons.items():
+            if key == active_key:
+                btn.configure(
+                    fg_color=colors["accent"],
+                    text_color="#FFFFFF",
+                    hover_color=colors["button_hover"],
+                )
+            else:
+                btn.configure(
+                    fg_color="transparent",
+                    text_color=colors["text_secondary"],
+                    hover_color=colors["nav_border"],
+                )
 
-        self._scroll_canvas = tk.Canvas(canvas_container, highlightthickness=0)
-        scrollbar = tk.Scrollbar(
-            canvas_container, orient=tk.VERTICAL,
-            command=self._scroll_canvas.yview
-        )
-        self._scroll_canvas.configure(yscrollcommand=scrollbar.set)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        self._scroll_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-
-        self._content_frame = tk.Frame(self._scroll_canvas)
-        self._canvas_window = self._scroll_canvas.create_window(
-            (0, 0), window=self._content_frame, anchor=tk.NW
-        )
-
-        self._content_frame.bind("<Configure>", self._on_frame_configure)
-        self._scroll_canvas.bind("<Configure>", self._on_canvas_configure)
-
-        # Bind mouse wheel scrolling
-        self._scroll_canvas.bind_all("<MouseWheel>", self._on_mousewheel)
-
-        # ---- Analog clock ----
-        self._analog_view = AnalogClockView(self._content_frame)
-        self._analog_view.build()
-
-        # ---- Digital clock ----
-        self._digital_view = DigitalClockView(self._content_frame)
-        self._digital_view.build()
-
-        # ---- Separator ----
-        tk.Frame(self._content_frame, height=1).pack(fill=tk.X, padx=16, pady=2)
-
-        # ---- Alarm ----
-        self._alarm_view = AlarmView(self._content_frame)
-        self._alarm_view.build()
-
-        # ---- Stopwatch ----
-        self._stopwatch_view = StopwatchView(self._content_frame)
-        self._stopwatch_view.build()
-
-        # ---- Timer ----
-        self._timer_view = TimerView(self._content_frame)
-        self._timer_view.build()
-
-        # ---- Timezone ----
-        self._timezone_view = TimezoneView(self._content_frame)
-        self._timezone_view.build()
-
-        # Bottom padding
-        tk.Frame(self._content_frame, height=12).pack()
-
-        self._top_bar = top_bar
-        self._canvas_container = canvas_container
-
-    # ------------------------------------------------------------------
-    # Theme management
-    # ------------------------------------------------------------------
+    # ══════════════════════════════════════════════════════════════════
+    # Theme
+    # ══════════════════════════════════════════════════════════════════
 
     def _toggle_theme(self) -> None:
-        """Toggle between light and dark themes."""
-        new_theme = self._theme.toggle()
+        self._theme.toggle()
+        is_dark = self._theme.is_dark()
+        ctk.set_appearance_mode("dark" if is_dark else "light")
         self._theme_btn.configure(
-            text="☀️ Light Mode" if self._theme.is_dark() else "🌙 Dark Mode"
+            text="☀️  Modo Claro" if is_dark else "🌙  Modo Oscuro"
         )
-        logger.info("Theme toggled to '%s'.", new_theme)
+        # Sync settings switch
+        if hasattr(self, "_dark_switch"):
+            if is_dark:
+                self._dark_switch.select()
+            else:
+                self._dark_switch.deselect()
 
     def _apply_theme_to_all(self, colors: Dict[str, str]) -> None:
-        """Apply the given color palette to every view and widget.
-
-        Args:
-            colors: Theme color dictionary.
-        """
-        bg = colors["bg_window"]
-        fg = colors["text_primary"]
-        btn_bg = colors["button_bg"]
-        btn_fg = colors["button_fg"]
+        bg     = colors["bg_window"]
+        nav_bg = colors["nav_bg"]
+        card   = colors["bg_card"]
 
         self._window.apply_theme(colors)
-        self._scroll_canvas.configure(bg=bg)
-        self._content_frame.configure(bg=bg)
-        self._canvas_container.configure(bg=bg)
-        self._top_bar.configure(bg=bg)
-        self._title_label.configure(bg=bg, fg=fg)
+        self._top_bar.configure(fg_color=card)
+        self._title_label.configure(text_color=colors["text_primary"])
         self._theme_btn.configure(
-            bg=btn_bg, fg=btn_fg,
-            activebackground=btn_bg, activeforeground=btn_fg,
+            fg_color=colors["button2_bg"], text_color=colors["button2_fg"],
+            hover_color=colors["entry_bg"],
         )
+
+        self._content_area.configure(fg_color=bg)
+        for frame in self._screens.values():
+            frame.configure(fg_color=bg)
+            for child in frame.winfo_children():
+                if isinstance(child, ctk.CTkLabel):
+                    try:
+                        child.configure(text_color=colors["text_primary"])
+                    except Exception:
+                        pass
+
+        self._nav_bar.configure(fg_color=nav_bg)
+        self._nav_sep.configure(fg_color=colors["nav_border"])
+        self._nav_inner.configure(fg_color=nav_bg)
+        self._update_nav_highlight(self._active_screen)
+
+        if hasattr(self, "_reset_time_btn"):
+            self._reset_time_btn.configure(
+                fg_color=colors["button2_bg"], text_color=colors["text_secondary"],
+                hover_color=colors["entry_bg"],
+            )
+        if hasattr(self, "_settings_card"):
+            self._settings_card.configure(fg_color=card)
 
         self._analog_view.apply_theme(colors)
         self._digital_view.apply_theme(colors)
@@ -249,47 +446,38 @@ class App:
         self._timer_view.apply_theme(colors)
         self._timezone_view.apply_theme(colors)
 
-        # Redraw analog clock with new colors immediately
         try:
             h, m, s = self._clock_model.get_hand_angles()
             self._analog_view.draw(h, m, s)
         except Exception as exc:
             logger.debug("Theme redraw skipped: %s", exc)
 
-    # ------------------------------------------------------------------
-    # Scroll helpers
-    # ------------------------------------------------------------------
+    # ══════════════════════════════════════════════════════════════════
+    # Clock offset badge
+    # ══════════════════════════════════════════════════════════════════
 
-    def _on_frame_configure(self, _event: tk.Event) -> None:
-        """Update scroll region when the content frame resizes."""
-        self._scroll_canvas.configure(
-            scrollregion=self._scroll_canvas.bbox("all")
-        )
+    def _update_offset_badge(self) -> None:
+        """Show/hide the 'Hora ajustada' badge in the top bar."""
+        if self._clock_model.has_manual_offset:
+            self._offset_badge.pack(side=tk.LEFT, padx=4)
+        else:
+            self._offset_badge.pack_forget()
 
-    def _on_canvas_configure(self, event: tk.Event) -> None:
-        """Keep the content frame width in sync with the canvas."""
-        self._scroll_canvas.itemconfig(self._canvas_window, width=event.width)
+    def _reset_clock_offset(self) -> None:
+        self._clock_model.reset_offset()
 
-    def _on_mousewheel(self, event: tk.Event) -> None:
-        """Handle mouse wheel scrolling."""
-        self._scroll_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
-
-    # ------------------------------------------------------------------
-    # Application lifecycle
-    # ------------------------------------------------------------------
+    # ══════════════════════════════════════════════════════════════════
+    # Lifecycle
+    # ══════════════════════════════════════════════════════════════════
 
     def run(self) -> None:
-        """Start all controllers and enter the tkinter event loop."""
         self._clock_ctrl.start()
         self._alarm_ctrl.start()
         self._stopwatch_ctrl.start()
         self._timer_ctrl.start()
-        logger.info("All controllers started. Entering mainloop.")
         self._window.mainloop()
 
     def _on_close(self) -> None:
-        """Gracefully shut down all controllers and destroy the window."""
-        logger.info("Shutting down application.")
         self._clock_ctrl.stop()
         self._alarm_ctrl.stop()
         self._stopwatch_ctrl.stop()
